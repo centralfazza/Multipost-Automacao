@@ -2,6 +2,7 @@
 multipost.py
 Rotas CRUD de posts + ações de publicação imediata e agendamento.
 """
+import logging
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
@@ -12,7 +13,9 @@ from ..database import get_db
 from ..models import MediaPost, InstagramAccount, PostResult
 from ..security import verify_api_key
 from ..validators import validate_media_urls, sanitize_caption
+from ..rate_limiter import limiter, RATE_LIMITS
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -118,7 +121,8 @@ def delete_post(post_id: str, db: Session = Depends(get_db)):
 # ─────────────────────────────────────────────────
 
 @router.post("/{post_id}/publish")
-def publish_now(post_id: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db), api_key: str = Depends(verify_api_key)):
+@limiter.limit(RATE_LIMITS["api_publish"])
+def publish_now(post_id: str, request=None, background_tasks: BackgroundTasks = None, db: Session = Depends(get_db), api_key: str = Depends(verify_api_key)):
     """
     Dispara publicação imediata em todas as contas alvo.
     A publicação ocorre em background para não bloquear o request.
@@ -181,44 +185,46 @@ def get_results(post_id: str, db: Session = Depends(get_db)):
 # ─────────────────────────────────────────────────
 
 def _publish_background(post_id: str):
-    """Executa a publicação no Instagram em background tasks do FastAPI."""
+    """Executa a publicação no Instagram em background tasks do FastAPI com retry logic."""
     from ..database import SessionLocal
-    from ..services.instagram_publisher import InstagramPublisher, InstagramPublisherError
+    from ..services.post_publisher import PostPublisher
 
     db = SessionLocal()
     try:
+        logger.info(f"🚀 Iniciando publicação de post {post_id}")
+
         post = db.query(MediaPost).filter(MediaPost.id == post_id).first()
         if not post:
+            logger.error(f"Post {post_id} não encontrado")
             return
 
         target_ids = post.target_account_ids or []
+        if not target_ids:
+            logger.warning(f"Post {post_id} sem contas alvo")
+            post.status = "error"
+            db.commit()
+            return
+
         accounts = db.query(InstagramAccount).filter(
             InstagramAccount.id.in_(target_ids),
             InstagramAccount.is_active == True,
         ).all()
 
-        all_success = True
-        for account in accounts:
-            result = PostResult(post_id=post.id, account_id=account.id)
-            try:
-                publisher = InstagramPublisher(account.access_token, account.instagram_user_id)
-                ig_media_id = publisher.publish_post(
-                    media_urls=post.media_urls,
-                    media_type=post.media_type,
-                    caption=post.caption,
-                )
-                result.ig_media_id = ig_media_id
-                result.status = "success"
-                result.published_at = datetime.utcnow()
-            except InstagramPublisherError as exc:
-                result.status = "error"
-                result.error_message = str(exc)
-                all_success = False
+        logger.info(f"Post {post_id} será publicado em {len(accounts)} conta(s)")
 
-            db.add(result)
+        publisher = PostPublisher(db)
+        all_success = publisher.publish_to_all_accounts(post_id)
 
         post.status = "done" if all_success else "error"
         db.commit()
+
+        logger.info(f"✅ Post {post_id} finalizado com sucesso={all_success}")
+    except Exception as exc:
+        logger.error(f"❌ Erro ao publicar post {post_id}: {exc}", exc_info=True)
+        post = db.query(MediaPost).filter(MediaPost.id == post_id).first()
+        if post:
+            post.status = "error"
+            db.commit()
     finally:
         db.close()
 
