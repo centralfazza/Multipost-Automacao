@@ -1,0 +1,33 @@
+{
+    "company_id": "company_123",
+    "name": "Comentário → DM Automático",
+    "platform": "instagram",
+    "is_active": true,
+    "triggers": {
+        "type": "comment",
+        "keywords": [
+            "QUERO",
+            "quero",
+            "INFO",
+            "info"
+        ],
+        "post_id": null
+    },
+    "actions": [
+        {
+            "order": 1,
+            "type": "reply_comment",
+            "content": "Acabei de te enviar os detalhes no direct! 📩"
+        },
+        {
+            "order": 2,
+            "type": "send_dm",
+            "content": "Olá {username}! Fico feliz pelo interesse. Aqui está o link que você pediu: [URL_MAGICA] 🎯"
+        },
+        {
+            "order": 3,
+            "type": "add_tag",
+            "tag": "lead_comentario_post"
+        }
+    ]
+}

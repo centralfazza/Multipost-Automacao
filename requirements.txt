@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+psycopg2-binary
+requests
+httpx
+apscheduler>=3.10.0
+python-multipart
+pydantic[email]
+pydantic
+python-dotenv
+slowapi
+python-json-logger
