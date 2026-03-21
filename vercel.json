@@ -15,7 +15,7 @@
   "crons": [
     {
       "path": "/cron/publish-scheduled",
-      "schedule": "* * * * *"
+      "schedule": "0 * * * *"
     }
   ]
 }
