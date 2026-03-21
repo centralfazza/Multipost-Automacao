@@ -3,6 +3,7 @@ Facebook publishing service.
 Uses the Graph API to post to a Facebook Page (photo or video).
 Docs: https://developers.facebook.com/docs/graph-api/reference/page/photos
 """
+import json
 from typing import Any, Optional
 import httpx
 from .base import BasePlatformService
@@ -58,7 +59,7 @@ class FacebookService(BasePlatformService):
             params={
                 "message": caption,
                 "access_token": token,
-                "attached_media": str(photo_ids),
+                "attached_media": json.dumps(photo_ids),  # must be valid JSON, not Python repr
             },
         )
         resp.raise_for_status()

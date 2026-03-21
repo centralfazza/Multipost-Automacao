@@ -3,6 +3,7 @@ Authentication routes — register, login, me.
 Uses JWT tokens (same pattern as the DM automation backend).
 """
 import os
+import logging
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -17,10 +18,18 @@ from ..models import User
 from ..schemas import Token, UserCreate, UserOut
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
-SECRET_KEY = os.getenv("SECRET_KEY", "change-me-in-production")
+_DEFAULT_SECRET = "change-me-in-production"
+SECRET_KEY = os.getenv("SECRET_KEY", _DEFAULT_SECRET)
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
+
+if SECRET_KEY == _DEFAULT_SECRET:
+    logger.warning(
+        "SECURITY WARNING: SECRET_KEY is set to the default insecure value. "
+        "Set a strong random SECRET_KEY environment variable before going to production."
+    )
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")

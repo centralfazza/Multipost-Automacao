@@ -15,6 +15,7 @@ from ..database import get_db
 from ..models import Channel, User, SUPPORTED_PLATFORMS
 from ..schemas import ChannelCreate, ChannelUpdate, ChannelOut
 from .auth import get_current_user
+from .oauth import _create_state, _consume_state, _upsert_channel
 
 router = APIRouter()
 
@@ -105,14 +106,18 @@ async def delete_channel(
 # ---------------------------------------------------------------------------
 
 @router.get("/instagram/connect")
-async def instagram_connect(current_user: User = Depends(get_current_user)):
+async def instagram_connect(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Redirect user to Meta's OAuth consent screen."""
+    state_token = await _create_state(db, current_user.id, "instagram")
     params = {
         "client_id": os.getenv("INSTAGRAM_APP_ID"),
         "redirect_uri": os.getenv("INSTAGRAM_REDIRECT_URI"),
         "scope": "instagram_basic,instagram_content_publish,pages_show_list,pages_read_engagement",
         "response_type": "code",
-        "state": current_user.id,
+        "state": state_token,
     }
     url = "https://www.facebook.com/v18.0/dialog/oauth?" + urlencode(params)
     return {"auth_url": url}
@@ -125,11 +130,12 @@ async def instagram_callback(
     db: AsyncSession = Depends(get_db),
 ):
     """Exchange code → short-lived → long-lived token, store channel."""
+    oauth_state = await _consume_state(db, state, "instagram")
     app_id = os.getenv("INSTAGRAM_APP_ID")
     app_secret = os.getenv("INSTAGRAM_APP_SECRET")
     redirect_uri = os.getenv("INSTAGRAM_REDIRECT_URI")
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30) as client:
         # Short-lived token
         resp = await client.post(
             "https://graph.facebook.com/v18.0/oauth/access_token",
@@ -165,30 +171,14 @@ async def instagram_callback(
         me_data = me.json()
 
     ig_id = me_data.get("instagram_business_account", {}).get("id") or me_data["id"]
-
-    # Upsert channel
-    q = select(Channel).where(
-        Channel.user_id == state,
-        Channel.platform == "instagram",
-        Channel.account_id == ig_id,
+    channel = await _upsert_channel(
+        db,
+        user_id=oauth_state.user_id,
+        platform="instagram",
+        account_id=ig_id,
+        account_name=me_data.get("name", ""),
+        access_token=long_token,
     )
-    result = await db.execute(q)
-    channel = result.scalar_one_or_none()
-
-    if channel:
-        channel.access_token = long_token
-        channel.account_name = me_data.get("name")
-    else:
-        channel = Channel(
-            user_id=state,
-            platform="instagram",
-            account_id=ig_id,
-            account_name=me_data.get("name"),
-            access_token=long_token,
-        )
-        db.add(channel)
-
-    await db.flush()
     return {"message": "Instagram connected", "channel_id": channel.id}
 
 
@@ -197,14 +187,18 @@ async def instagram_callback(
 # ---------------------------------------------------------------------------
 
 @router.get("/tiktok/connect")
-async def tiktok_connect(current_user: User = Depends(get_current_user)):
+async def tiktok_connect(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Redirect user to TikTok's OAuth consent screen."""
+    state_token = await _create_state(db, current_user.id, "tiktok")
     params = {
         "client_key": os.getenv("TIKTOK_CLIENT_KEY"),
         "redirect_uri": os.getenv("TIKTOK_REDIRECT_URI"),
         "scope": "user.info.basic,video.publish,video.upload",
         "response_type": "code",
-        "state": current_user.id,
+        "state": state_token,
     }
     url = "https://www.tiktok.com/v2/auth/authorize?" + urlencode(params)
     return {"auth_url": url}
@@ -213,7 +207,9 @@ async def tiktok_connect(current_user: User = Depends(get_current_user)):
 @router.get("/tiktok/callback")
 async def tiktok_callback(code: str, state: str, db: AsyncSession = Depends(get_db)):
     """Exchange code → access token, store channel."""
-    async with httpx.AsyncClient() as client:
+    oauth_state = await _consume_state(db, state, "tiktok")
+
+    async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             "https://open.tiktokapis.com/v2/oauth/token/",
             data={
@@ -228,25 +224,15 @@ async def tiktok_callback(code: str, state: str, db: AsyncSession = Depends(get_
         data = resp.json().get("data", resp.json())
         access_token = data["access_token"]
         open_id = data["open_id"]
+        refresh_token = data.get("refresh_token")
 
-    q = select(Channel).where(
-        Channel.user_id == state,
-        Channel.platform == "tiktok",
-        Channel.account_id == open_id,
+    channel = await _upsert_channel(
+        db,
+        user_id=oauth_state.user_id,
+        platform="tiktok",
+        account_id=open_id,
+        account_name="",
+        access_token=access_token,
+        refresh_token=refresh_token,
     )
-    result = await db.execute(q)
-    channel = result.scalar_one_or_none()
-
-    if channel:
-        channel.access_token = access_token
-    else:
-        channel = Channel(
-            user_id=state,
-            platform="tiktok",
-            account_id=open_id,
-            access_token=access_token,
-        )
-        db.add(channel)
-
-    await db.flush()
     return {"message": "TikTok connected", "channel_id": channel.id}

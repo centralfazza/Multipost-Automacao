@@ -3,8 +3,11 @@ Platform-specific media validation.
 Checks format, file size, duration and dimensions before attempting to publish.
 Raises ValueError with a clear message if content doesn't meet platform specs.
 """
+import ipaddress
+import re
 from dataclasses import dataclass
 from typing import Optional
+from urllib.parse import urlparse
 
 # ---------------------------------------------------------------------------
 # Platform specs (official, as of 2025)
@@ -138,6 +141,31 @@ CAPTION_LIMITS: dict[str, int] = {
 }
 
 
+def _is_safe_url(url: str) -> bool:
+    """Return False if the URL could reach private/internal infrastructure (SSRF guard)."""
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("https",):
+            return False
+        hostname = parsed.hostname or ""
+        # Block localhost and metadata endpoints
+        if hostname in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+            return False
+        # Block common cloud metadata endpoints
+        if hostname in ("169.254.169.254", "metadata.google.internal"):
+            return False
+        # Block private IP ranges
+        try:
+            addr = ipaddress.ip_address(hostname)
+            if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:
+                return False
+        except ValueError:
+            pass  # hostname is a domain name, not an IP — allow it
+        return True
+    except Exception:
+        return False
+
+
 def validate_media(
     platform: str,
     media_type: str,      # "image" | "video" | "carousel"
@@ -151,6 +179,11 @@ def validate_media(
     An empty list means all checks passed.
     """
     warnings: list[str] = []
+
+    # SSRF guard — all URLs must be public HTTPS
+    for url in media_urls:
+        if not _is_safe_url(url):
+            warnings.append(f"Unsafe or non-HTTPS URL rejected: {url}")
 
     # Caption length
     if caption and platform in CAPTION_LIMITS:

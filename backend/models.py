@@ -119,3 +119,19 @@ class PostResult(Base):
 
     post: Mapped["Post"] = relationship(back_populates="results")
     channel: Mapped["Channel"] = relationship(back_populates="post_results")
+
+
+# ---------------------------------------------------------------------------
+# OAuthState  (DB-backed PKCE / state tokens — replaces in-memory dict)
+# ---------------------------------------------------------------------------
+
+class OAuthState(Base):
+    __tablename__ = "oauth_states"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    platform: Mapped[str] = mapped_column(String(50), nullable=False)
+    state_token: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    code_verifier: Mapped[str] = mapped_column(String(256), nullable=True)  # PKCE — Twitter only
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
