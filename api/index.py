@@ -1,3 +1,3 @@
-from app.main import app
+from backend.main import app
 
-# Vercel entry point
+# Vercel entry point for Multipost Automation API v3.0

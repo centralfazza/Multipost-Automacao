@@ -7,8 +7,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .database import init_db
+from .rate_limiter import limiter
 from .routes import auth, channels, posts, analytics
-from .routes import oauth, media, cron
+from .routes import oauth, media, cron, batch_posts
 
 
 @asynccontextmanager
@@ -20,7 +21,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Multipost Automation API",
     description="Post content to TikTok, Instagram, YouTube, Twitter, Facebook and LinkedIn in one shot.",
-    version="2.0.0",
+    version="3.0.0",
     lifespan=lifespan,
 )
 
@@ -35,11 +36,17 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
 )
 
+# Apply rate limiter
+app.state.limiter = limiter
+
 # Core routes
 app.include_router(auth.router,      prefix="/auth",      tags=["Auth"])
 app.include_router(channels.router,  prefix="/channels",  tags=["Channels"])
 app.include_router(posts.router,     prefix="/posts",     tags=["Posts"])
 app.include_router(analytics.router, prefix="/analytics", tags=["Analytics"])
+
+# Batch operations
+app.include_router(batch_posts.router, prefix="/posts", tags=["Batch Posts"])
 
 # OAuth flows for all remaining platforms
 app.include_router(oauth.router,     prefix="/oauth",     tags=["OAuth"])

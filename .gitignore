@@ -63,3 +63,19 @@ out/
 
 # Vercel
 .vercel/
+
+# Alembic migrations (versioned)
+migrations/versions/*.py
+
+# IDE Temporary files
+*.bak
+.project
+.pydevproject
+
+# OS
+Thumbs.db
+
+# pytest
+.pytest_cache/
+.coverage*
+htmlcov/
