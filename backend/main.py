@@ -2,13 +2,13 @@
 FastAPI application — Multipost Automation Backend.
 Handles posting content to multiple social platforms simultaneously.
 """
-import mimetypes
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .database import init_db
 from .routes import auth, channels, posts, analytics
+from .routes import oauth, media, cron
 
 
 @asynccontextmanager
@@ -20,11 +20,10 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Multipost Automation API",
     description="Post content to TikTok, Instagram, YouTube, Twitter, Facebook and LinkedIn in one shot.",
-    version="1.0.0",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
-# Allow any origin — tighten this in production if needed
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -33,16 +32,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Register routers
+# Core routes
 app.include_router(auth.router,      prefix="/auth",      tags=["Auth"])
 app.include_router(channels.router,  prefix="/channels",  tags=["Channels"])
 app.include_router(posts.router,     prefix="/posts",     tags=["Posts"])
 app.include_router(analytics.router, prefix="/analytics", tags=["Analytics"])
 
+# OAuth flows for all remaining platforms
+app.include_router(oauth.router,     prefix="/oauth",     tags=["OAuth"])
+
+# Media upload (Vercel Blob)
+app.include_router(media.router,     prefix="/media",     tags=["Media"])
+
+# Vercel Cron — scheduled post worker
+app.include_router(cron.router,      prefix="/cron",      tags=["Cron"])
+
 
 @app.get("/health", tags=["Health"])
 async def health():
-    return {"status": "ok", "service": "multipost-api"}
+    return {"status": "ok", "service": "multipost-api", "version": "2.0.0"}
 
 
 if __name__ == "__main__":
