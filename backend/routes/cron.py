@@ -9,7 +9,7 @@ Configure in vercel.json:
 """
 import os
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import select
@@ -52,8 +52,26 @@ async def publish_scheduled(db: AsyncSession = Depends(get_db)):
     )
     due_posts = result.scalars().all()
 
+    # Recover posts stuck in "publishing" for more than 15 minutes
+    stale_cutoff = now - timedelta(minutes=15)
+    stale_result = await db.execute(
+        select(Post).where(
+            Post.status == "publishing",
+            Post.scheduled_at != None,
+            Post.scheduled_at <= stale_cutoff,
+        )
+    )
+    stale_posts = stale_result.scalars().all()
+    recovered = 0
+    for post in stale_posts:
+        post.status = "failed"
+        recovered += 1
+        logger.warning("Recovered stale publishing post %s — marked as failed", post.id)
+    if recovered:
+        await db.commit()
+
     if not due_posts:
-        return {"triggered": 0}
+        return {"triggered": 0, "recovered": recovered}
 
     triggered = 0
     for post in due_posts:
@@ -100,4 +118,4 @@ async def publish_scheduled(db: AsyncSession = Depends(get_db)):
         triggered += 1
         logger.info("Triggered scheduled post %s", post.id)
 
-    return {"triggered": triggered, "post_ids": [p.id for p in due_posts]}
+    return {"triggered": triggered, "recovered": recovered, "post_ids": [p.id for p in due_posts]}

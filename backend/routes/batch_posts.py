@@ -1,221 +1,150 @@
 """
 batch_posts.py
-Processamento em lote de posts.
+Batch operations for creating and publishing multiple posts.
 """
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
-from sqlalchemy.orm import Session
+from datetime import datetime, timezone
+from typing import Optional
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
-from typing import Optional, List
-from datetime import datetime
-import uuid
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from ..database import get_db
-from ..models import MediaPost, InstagramAccount
-from ..security import verify_api_key
-from ..validators import validate_media_urls, sanitize_caption
-from ..services.post_publisher import PostPublisher
+from ..models import Channel, Post, PostResult, User
+from ..schemas import PostOut
+from .auth import get_current_user
+from .posts import _run_publish, _build_channel_result_map
 
 router = APIRouter()
 
 
+class BatchPostItem(BaseModel):
+    caption: Optional[str] = None
+    media_urls: list[str] = []
+    media_type: Optional[str] = None
+    hashtags: Optional[str] = None
+    channel_ids: list[str]
+    extra_data: Optional[dict] = None
+
+
 class BatchPostCreate(BaseModel):
-    company_id: str
-    posts: List[dict]  # [{"caption": "...", "media_urls": [...], ...}, ...]
-    target_account_ids: List[str] = []
+    posts: list[BatchPostItem]
 
 
-class BatchPostSchedule(BaseModel):
-    post_ids: List[str]
-    scheduled_at: datetime
+class BatchPublish(BaseModel):
+    post_ids: list[str]
 
 
-def _validate_post_item(item: dict) -> tuple[dict, Optional[str]]:
-    """Valida um item de post em lote. Retorna (item validado, erro)."""
-    try:
-        caption = item.get("caption")
-        media_urls = item.get("media_urls", [])
-        media_type = item.get("media_type", "IMAGE").upper()
-
-        if not media_urls:
-            return None, "media_urls vazio"
-
-        validate_media_urls(media_urls, media_type)
-
-        return {
-            "caption": sanitize_caption(caption) if caption else None,
-            "media_urls": media_urls,
-            "media_type": media_type,
-        }, None
-    except Exception as exc:
-        return None, str(exc)
-
-
-@router.post("/batch", status_code=201)
-def create_batch_posts(
+@router.post("/batch/create", status_code=201)
+async def create_batch_posts(
     body: BatchPostCreate,
-    db: Session = Depends(get_db),
-    api_key: str = Depends(verify_api_key),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
-    """
-    Cria múltiplos posts em lote.
-    Retorna lista com IDs dos posts criados e erros (se houver).
-    """
+    """Create multiple posts in one request."""
     if not body.posts:
-        raise HTTPException(status_code=400, detail="posts vazio")
-
+        raise HTTPException(400, "posts list is empty")
     if len(body.posts) > 100:
-        raise HTTPException(status_code=400, detail="Máximo 100 posts por lote")
+        raise HTTPException(400, "Maximum 100 posts per batch")
 
-    # Validar accounts
-    if body.target_account_ids:
-        accounts = db.query(InstagramAccount).filter(
-            InstagramAccount.id.in_(body.target_account_ids)
-        ).all()
-        if len(accounts) != len(body.target_account_ids):
-            raise HTTPException(status_code=400, detail="Uma ou mais contas não encontradas")
-
-    created_posts = []
+    created = []
     errors = []
 
-    for idx, post_item in enumerate(body.posts):
-        validated, error = _validate_post_item(post_item)
-
-        if error:
-            errors.append({"index": idx, "error": error})
-            continue
-
+    for idx, item in enumerate(body.posts):
         try:
-            post = MediaPost(
-                company_id=body.company_id,
-                caption=validated.get("caption"),
-                media_urls=validated.get("media_urls"),
-                media_type=validated.get("media_type"),
-                target_account_ids=body.target_account_ids,
-                status="draft",
+            # Validate channels
+            result = await db.execute(
+                select(Channel).where(
+                    Channel.id.in_(item.channel_ids),
+                    Channel.user_id == current_user.id,
+                    Channel.is_active == True,
+                )
+            )
+            channels = result.scalars().all()
+            if not channels:
+                errors.append({"index": idx, "error": "No valid channels found"})
+                continue
+
+            post = Post(
+                user_id=current_user.id,
+                caption=item.caption,
+                media_urls=item.media_urls,
+                media_type=item.media_type,
+                hashtags=item.hashtags,
+                extra_data=item.extra_data,
+                status="pending",
             )
             db.add(post)
-            db.flush()
-            created_posts.append({
-                "index": idx,
-                "post_id": post.id,
-                "status": "draft",
-            })
+            await db.flush()
+
+            for ch in channels:
+                db.add(PostResult(
+                    post_id=post.id,
+                    channel_id=ch.id,
+                    platform=ch.platform,
+                    status="pending",
+                ))
+            await db.flush()
+
+            created.append({"index": idx, "post_id": post.id, "status": "pending"})
         except Exception as exc:
             errors.append({"index": idx, "error": str(exc)})
 
-    db.commit()
-
     return {
         "total_requested": len(body.posts),
-        "created": len(created_posts),
+        "created": len(created),
         "failed": len(errors),
-        "posts": created_posts,
+        "posts": created,
         "errors": errors,
     }
 
 
-@router.post("/batch-schedule")
-def schedule_batch_posts(
-    body: BatchPostSchedule,
-    db: Session = Depends(get_db),
-    api_key: str = Depends(verify_api_key),
-):
-    """
-    Agenda múltiplos posts para a mesma hora.
-    """
-    if not body.post_ids:
-        raise HTTPException(status_code=400, detail="post_ids vazio")
-
-    if len(body.post_ids) > 100:
-        raise HTTPException(status_code=400, detail="Máximo 100 posts por lote")
-
-    if body.scheduled_at <= datetime.utcnow():
-        raise HTTPException(status_code=400, detail="scheduled_at deve ser no futuro")
-
-    posts = db.query(MediaPost).filter(MediaPost.id.in_(body.post_ids)).all()
-    scheduled = 0
-    errors = []
-
-    for post in posts:
-        try:
-            if post.status not in ("draft", "scheduled", "error"):
-                errors.append({"post_id": post.id, "error": f"Status {post.status} não pode ser agendado"})
-                continue
-
-            if not post.target_account_ids:
-                errors.append({"post_id": post.id, "error": "Nenhuma conta alvo"})
-                continue
-
-            post.scheduled_at = body.scheduled_at
-            post.status = "scheduled"
-            scheduled += 1
-        except Exception as exc:
-            errors.append({"post_id": post.id, "error": str(exc)})
-
-    db.commit()
-
-    return {
-        "total_requested": len(body.post_ids),
-        "scheduled": scheduled,
-        "failed": len(errors),
-        "scheduled_at": body.scheduled_at.isoformat(),
-        "errors": errors,
-    }
-
-
-@router.post("/batch-publish")
-def publish_batch_posts(
-    post_ids: List[str],
+@router.post("/batch/publish")
+async def publish_batch_posts(
+    body: BatchPublish,
     background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
-    api_key: str = Depends(verify_api_key),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
-    """
-    Publica múltiplos posts em background.
-    Cada post é publicado com delay para respeitar rate limits.
-    """
-    if not post_ids:
-        raise HTTPException(status_code=400, detail="post_ids vazio")
+    """Publish multiple posts in background."""
+    if not body.post_ids:
+        raise HTTPException(400, "post_ids is empty")
+    if len(body.post_ids) > 50:
+        raise HTTPException(400, "Maximum 50 posts per batch")
 
-    if len(post_ids) > 50:
-        raise HTTPException(status_code=400, detail="Máximo 50 posts por lote")
+    result = await db.execute(
+        select(Post)
+        .options(selectinload(Post.results))
+        .where(Post.id.in_(body.post_ids), Post.user_id == current_user.id)
+    )
+    posts = result.scalars().all()
 
-    posts = db.query(MediaPost).filter(MediaPost.id.in_(post_ids)).all()
+    if not posts:
+        raise HTTPException(404, "No posts found")
 
     for post in posts:
-        if post.status not in ("draft", "scheduled", "error"):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Post {post.id} com status {post.status} não pode ser publicado"
-            )
-        if not post.target_account_ids:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Post {post.id} sem contas alvo"
-            )
-        post.status = "publishing"
+        channel_ids = [r.channel_id for r in post.results]
+        ch_result = await db.execute(select(Channel).where(Channel.id.in_(channel_ids)))
+        channels = ch_result.scalars().all()
 
-    db.commit()
+        result_by_channel = {r.channel_id: r.id for r in post.results}
+        channel_result_map = _build_channel_result_map(channels, result_by_channel)
 
-    # Adicionar delay entre posts para respeitar rate limits
-    for idx, post_id in enumerate(post_ids):
-        delay_seconds = idx * 5  # 5s delay entre cada post
-        background_tasks.add_task(_publish_with_delay, post_id, delay_seconds)
+        background_tasks.add_task(
+            _run_publish,
+            post.id,
+            post.caption or "",
+            post.media_urls or [],
+            post.media_type or "image",
+            post.hashtags,
+            post.extra_data,
+            channel_result_map,
+        )
 
     return {
         "total_posts": len(posts),
         "status": "publishing",
-        "message": f"{len(posts)} posts agendados para publicação com delay de 5s entre cada um",
+        "message": f"{len(posts)} posts queued for publishing",
     }
-
-
-def _publish_with_delay(post_id: str, delay_seconds: int):
-    """Helper para publicar com delay."""
-    import time
-    from ..database import SessionLocal
-    from .multipost import _publish_background
-
-    if delay_seconds > 0:
-        time.sleep(delay_seconds)
-
-    _publish_background(post_id)

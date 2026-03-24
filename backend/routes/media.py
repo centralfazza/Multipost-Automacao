@@ -70,8 +70,16 @@ async def upload_media(
             logger.error("Vercel Blob upload failed: %s %s", resp.status_code, resp.text)
             raise HTTPException(502, "Failed to upload file to storage")
 
-        data = resp.json()
-        public_url = data.get("url", "")
+        try:
+            data = resp.json()
+        except Exception:
+            logger.error("Vercel Blob returned non-JSON response: %s", resp.text[:200])
+            raise HTTPException(502, "Storage returned an invalid response")
+
+        public_url = data.get("url")
+        if not public_url:
+            logger.error("Vercel Blob response missing 'url': %s", data)
+            raise HTTPException(502, "Storage did not return a file URL")
 
     return {
         "url": public_url,

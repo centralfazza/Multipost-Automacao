@@ -194,7 +194,6 @@ async def ensure_fresh_token(channel, db: AsyncSession) -> str:
             channel.access_token = result
 
         # Reset expiry — most platforms give 60 days
-        from datetime import timedelta
         channel.token_expires_at = datetime.now(timezone.utc) + timedelta(days=60)
         await db.commit()
         logger.info("Refreshed token for %s channel %s", channel.platform, channel.id)

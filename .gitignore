@@ -64,8 +64,8 @@ out/
 # Vercel
 .vercel/
 
-# Alembic migrations (versioned)
-migrations/versions/*.py
+# Alembic auto-generated pycache
+migrations/versions/__pycache__/
 
 # IDE Temporary files
 *.bak
